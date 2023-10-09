@@ -89,29 +89,28 @@ def reconstruct(args):
 
     source_pcd = pcd_list[0]
 
-    aligned_pcd_list = [source_pcd]  # Store the aligned point clouds in this list
+    aligned_pcd_list = [source_pcd]  
 
     for i in range(1, len(pcd_list)):
         target = pcd_list[i]
         source_down, source_fpth = preprocess_point_cloud(source_pcd)
         target_down, target_fpfh = preprocess_point_cloud(target)
 
-        # Perform global registration (optional)
+        # global registration (optional)
         global_registration = execute_global_registration(
             source_down, target_down, source_fpth, target_fpfh )
         
-        # Perform local ICP registration
+        # local ICP registration
         trans = local_icp_algorithm(
             target_down, source_down, np.identity(4), threshold
         )
         target.transform(global_registration.transformation)
-        # Apply the transformation to align source with reference
+        # Apply the transformation to align target with source
         target.transform(trans)
 
         # Update the reference point cloud for the next iteration
         reference_pcd = target
 
-        # Append the aligned point cloud to the list
         aligned_pcd_list.append(target)
 
     return aligned_pcd_list, pred_cam_pos
