@@ -4,6 +4,8 @@ import argparse
 import os
 import cv2
 from matplotlib import pyplot as plt
+import copy
+
 
 def depth_image_to_point_cloud(rgb, depth):
     # TODO: Get point cloud from rgb and depth image 
@@ -11,9 +13,8 @@ def depth_image_to_point_cloud(rgb, depth):
     rgb_image = o3d.geometry.Image(rgb)
     depth_image = o3d.geometry.Image(depth)
     rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
-        rgb_image, depth_image, depth_scale=1000.0,
+        rgb_image, depth_image, depth_scale=1.0, convert_rgb_to_intensity = False
     )
-
     intrinsic = o3d.camera.PinholeCameraIntrinsic(
         width=width,
         height=height,
@@ -24,11 +25,36 @@ def depth_image_to_point_cloud(rgb, depth):
     )
 
     pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd_image, intrinsic)
-    #o3d.visualization.draw_geometries([pcd])
+    points = np.asarray(pcd.points)*10
+    pcd.points = o3d.utility.Vector3dVector(points)
     return pcd
 
 
-def preprocess_point_cloud(pcd, voxel_size = 0.009):
+'''
+    points = points[points[:, 2] < 1.5]
+    print(points)
+    
+
+    colors = np.asarray(pcd.colors)
+    colors = colors[colors[0:len(points)]]
+    pcd.colors = o3d.utility.Vector3dVector(colors)
+'''
+
+    
+
+
+#    print(np.unique(np.asarray(pcd.points)[:, 2]))
+#    exit()
+    # valid = points[:, 2] < upper_boud
+    # points = points[valid]
+    # colors = colors[valid]
+    
+    # print(np.unique(points[:, 2]))
+    # o3d.visualization.draw_geometries([pcd])
+
+    
+
+def preprocess_point_cloud(pcd, voxel_size = 0.000005):
     # TODO: Do voxelization to reduce the number of points for less memory usage and speedup
     pcd_down = pcd.voxel_down_sample(voxel_size)
 
@@ -37,32 +63,32 @@ def preprocess_point_cloud(pcd, voxel_size = 0.009):
     radius_feature = voxel_size * 5
     pcd_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
                                                                 pcd_down,
-                                                                o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=50)
+                                                                o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=100)
                                                                 )
     return pcd_down, pcd_fpfh
 
 
+
 def execute_global_registration(source_down, target_down, source_fpfh,
-                                target_fpfh, voxel_size = 0.009):
-    distance_threshold = voxel_size * 1.25
-    result = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
-                                                                                    source_down, target_down, source_fpfh, target_fpfh, True,                                                                                        distance_threshold,
-                                                                                    o3d.pipelines.registration.TransformationEstimationPointToPoint(False), 3, 
-                                                                                    [
-                                                                                        o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
-                                                                                        o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(distance_threshold)
-                                                                                    ], 
-                                                                                    o3d.pipelines.registration.RANSACConvergenceCriteria(400000, 500)
-                                                                                    )
-    return result
+                                     target_fpfh, voxel_size = 0.000005):
+    distance_threshold = voxel_size * 0.5
+    print("in")
+    result = o3d.pipelines.registration.registration_fgr_based_on_feature_matching(
+        source_down, target_down, source_fpfh, target_fpfh,
+        o3d.pipelines.registration.FastGlobalRegistrationOption(
+            maximum_correspondence_distance=distance_threshold))
+    trans = result.transformation
+    return trans
 
 
-def local_icp_algorithm(source_down, target_down, trans_init, threshold):
+def local_icp_algorithm(source_down, target_down, global_trans , voxel_size = 2/255*10):
     # TODO: Use Open3D ICP function to implement
+    distance_threshold = voxel_size * 0.4
+
     result = o3d.pipelines.registration.registration_icp(
-        source_down, target_down, threshold, trans_init,
+        source_down, target_down, distance_threshold, global_trans,
         o3d.pipelines.registration.TransformationEstimationPointToPoint(),
-        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=100)
+   #     o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=100)
     )
     trans = result.transformation
     return trans
@@ -73,12 +99,12 @@ def my_local_icp_algorithm(source_down, target_down, trans_init, voxel_size):
     raise NotImplementedError
     return result
 
-
 def reconstruct(args):
     # TODO: Return results
     pcd_list = []
-    threshold = 0.02
     pred_cam_pos = []
+    estimated_poses = []
+
     for i in range(len(rgb_file_list)):
         bgr_img = cv2.imread(rgb_file_list[i])
         rgb_img = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
@@ -91,29 +117,33 @@ def reconstruct(args):
 
     aligned_pcd_list = [source_pcd]  
 
-    for i in range(1, len(pcd_list)):
-        target = pcd_list[i]
+    trans = np.identity(4)
+    for i in range(1, 5):
+        target = copy.deepcopy(pcd_list[i])
         source_down, source_fpth = preprocess_point_cloud(source_pcd)
         target_down, target_fpfh = preprocess_point_cloud(target)
+         # Update the source point cloud for the next iteration
+        source_pcd = copy.deepcopy(pcd_list[i])
 
         # global registration (optional)
-        global_registration = execute_global_registration(
-            source_down, target_down, source_fpth, target_fpfh )
-        
+        global_trans = execute_global_registration(
+            target_down, source_down,  target_fpfh, source_fpth)
         # local ICP registration
-        trans = local_icp_algorithm(
-            target_down, source_down, np.identity(4), threshold
+        local_trans = local_icp_algorithm(
+            target_down, source_down, global_trans,
         )
-        target.transform(global_registration.transformation)
-        # Apply the transformation to align target with source
-        target.transform(trans)
 
-        # Update the reference point cloud for the next iteration
-        reference_pcd = target
+        trans = trans@global_trans
+        target.transform(trans)
+       
 
         aligned_pcd_list.append(target)
+        
+        #estimated_poses.append(np.asarray(target.transformation))
+    print(len(aligned_pcd_list))
 
-    return aligned_pcd_list, pred_cam_pos
+    #draw_registration_result(source_down, target_down, trans)
+    return aligned_pcd_list, estimated_poses
 
 
 
@@ -129,6 +159,7 @@ if __name__ == '__main__':
     elif args.floor == 2:
         args.data_root = "data_collection/second_floor/"
 
+    ground_truth_poses = np.load("data_collection/first_floor/GT_pose.npy")
     #get image
 
     rgb_folder_path = os.path.join(os.getcwd(), args.data_root, 'rgb')
@@ -152,13 +183,33 @@ if __name__ == '__main__':
     '''
     Hint: Mean L2 distance = mean(norm(ground truth - estimated camera trajectory))
     '''
-    print("Mean L2 distance: ", )
+    
+    l2_distances = [np.linalg.norm(gt - est) for gt, est in zip(ground_truth_poses, pred_cam_pos)]
+    mean_l2_distance = np.mean(l2_distances)
+    print("Mean L2 distance:", mean_l2_distance)
 
-    # TODO: Visualize result
     '''
+    # TODO: Visualize result
+    
     Hint: Sould visualize
     1. Reconstructed point cloud
     2. Red line: estimated camera pose
     3. Black line: ground truth camera pose
+    
+        # Create estimated camera pose geometries (red lines)
+    for pose in pred_cam_pos:
+        estimated_pose_geom = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+        estimated_pose_geom.transform(pose)
+        estimated_pose_geom.paint_uniform_color([1, 0, 0])  # Red
+        o3d.visualization.Visualizer().add_geometry(estimated_pose_geom)
+
+    # Create ground truth camera pose geometries (black lines)
+    for pose in ground_truth_poses:
+        ground_truth_pose_geom = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+        ground_truth_pose_geom.transform(pose)
+        ground_truth_pose_geom.paint_uniform_color([0, 0, 0])  # Black
+        o3d.visualization.Visualizer().add_geometry(ground_truth_pose_geom)
     '''
+    
     o3d.visualization.draw_geometries(result_pcd)
+    
