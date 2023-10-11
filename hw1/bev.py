@@ -23,6 +23,33 @@ class Projection(object):
         """
 
         ### TODO ###
+        new_pixels = []
+        trans_matrix = np.array([[1, 0, 0, 0], 
+                                [0, 0, 1, -1.5],
+                                [0, -1, 0, 0], 
+                                [0, 0, 0, 1]])
+        intrinsic_matrix = np.array([[256, 0, 256], 
+                            [0, 256, 256], 
+                            [0, 0, 1]])
+        homo_intrinsic_matrix = np.array([[256, 0, 256, 0], 
+                            [0, 256, 256, 0], 
+                            [0, 0, 1, 0]])
+        print(points)
+        for i in range(4):
+            current_point = [points[i][0], points[i][1], 1]
+            #image cor to camera cor
+            c2_camera_point = 2.5 * np. linalg. inv(intrinsic_matrix) @ current_point
+            print(c2_camera_point)
+            c2_camera_point = np.append(c2_camera_point, [1])
+
+            #change c2 cor to c1 cor
+            c1_camera_point = trans_matrix@c2_camera_point
+            #camera cor to image cor
+            new_point = homo_intrinsic_matrix @ c1_camera_point
+            u = int(new_point[0]/new_point[2])
+            v = int(new_point[1]/ new_point[2])
+            new_pixels.append([u, v])
+        print(new_pixels)
         return new_pixels
 
     def show_image(self, new_pixels, img_name='projection.png', color=(0, 0, 255), alpha=0.4):
@@ -71,8 +98,8 @@ if __name__ == "__main__":
 
     pitch_ang = -90
 
-    front_rgb = "bev_data/front1.png"
-    top_rgb = "bev_data/bev1.png"
+    front_rgb = "bev_data/front2.png"
+    top_rgb = "bev_data/bev2.png"
 
     # click the pixels on window
     img = cv2.imread(top_rgb, 1)
