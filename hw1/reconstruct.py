@@ -9,52 +9,31 @@ import copy
 
 def depth_image_to_point_cloud(rgb, depth):
     # TODO: Get point cloud from rgb and depth image 
-    height, width = depth.shape
+    
     rgb_image = o3d.geometry.Image(rgb)
     depth_image = o3d.geometry.Image(depth)
     rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
-        rgb_image, depth_image, depth_scale=1.0, convert_rgb_to_intensity = False
+        rgb, depth, depth_scale=1000, convert_rgb_to_intensity = False
     )
+
     intrinsic = o3d.camera.PinholeCameraIntrinsic(
-        width=width,
-        height=height,
-        fx=512.0,  
-        fy=512.0,
-        cx=width / 2,
-        cy=height / 2
+        width=512,
+        height=512,
+        fx=256.0,  
+        fy=256.0,
+        cx=512 / 2,
+        cy=512 / 2
     )
 
     pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd_image, intrinsic)
-    points = np.asarray(pcd.points)*10
-    pcd.points = o3d.utility.Vector3dVector(points)
+    pcd.transform([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
+
     return pcd
 
 
-'''
-    points = points[points[:, 2] < 1.5]
-    print(points)
     
 
-    colors = np.asarray(pcd.colors)
-    colors = colors[colors[0:len(points)]]
-    pcd.colors = o3d.utility.Vector3dVector(colors)
-'''
-
-    
-
-
-#    print(np.unique(np.asarray(pcd.points)[:, 2]))
-#    exit()
-    # valid = points[:, 2] < upper_boud
-    # points = points[valid]
-    # colors = colors[valid]
-    
-    # print(np.unique(points[:, 2]))
-    # o3d.visualization.draw_geometries([pcd])
-
-    
-
-def preprocess_point_cloud(pcd, voxel_size = 0.000005):
+def preprocess_point_cloud(pcd, voxel_size ):
     # TODO: Do voxelization to reduce the number of points for less memory usage and speedup
     pcd_down = pcd.voxel_down_sample(voxel_size)
 
@@ -70,24 +49,32 @@ def preprocess_point_cloud(pcd, voxel_size = 0.000005):
 
 
 def execute_global_registration(source_down, target_down, source_fpfh,
-                                     target_fpfh, voxel_size = 0.000005):
-    distance_threshold = voxel_size * 0.5
-    print("in")
-    result = o3d.pipelines.registration.registration_fgr_based_on_feature_matching(
-        source_down, target_down, source_fpfh, target_fpfh,
-        o3d.pipelines.registration.FastGlobalRegistrationOption(
-            maximum_correspondence_distance=distance_threshold))
+                                target_fpfh, voxel_size):
+    distance_threshold = voxel_size * 1.5
+    print(":: RANSAC registration on downsampled point clouds.")
+    print("   Since the downsampling voxel size is %.3f," % voxel_size)
+    print("   we use a liberal distance threshold %.3f." % distance_threshold)
+    result = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
+        source_down, target_down, source_fpfh, target_fpfh, True,
+        distance_threshold,
+        o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
+        3, [
+            o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(
+                0.9),
+            o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(
+                distance_threshold)
+        ], o3d.pipelines.registration.RANSACConvergenceCriteria(100000, 0.999))
     trans = result.transformation
     return trans
 
 
-def local_icp_algorithm(source_down, target_down, global_trans , voxel_size = 2/255*10):
+def local_icp_algorithm(source_down, target_down, global_trans , voxel_size ):
     # TODO: Use Open3D ICP function to implement
     distance_threshold = voxel_size * 0.4
 
     result = o3d.pipelines.registration.registration_icp(
         source_down, target_down, distance_threshold, global_trans,
-        o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+        o3d.pipelines.registration.TransformationEstimationPointToPlane(),
    #     o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=100)
     )
     trans = result.transformation
@@ -99,17 +86,17 @@ def my_local_icp_algorithm(source_down, target_down, trans_init, voxel_size):
     raise NotImplementedError
     return result
 
-def reconstruct(args):
+def reconstruct(args,rgb_file_list, depth_file_list):
     # TODO: Return results
     pcd_list = []
     pred_cam_pos = []
     estimated_poses = []
-
+    voxel_size = 0.000005
     for i in range(len(rgb_file_list)):
-        bgr_img = cv2.imread(rgb_file_list[i])
-        rgb_img = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
-        depth = cv2.imread(depth_file_list[i], -1)
-        pcd = depth_image_to_point_cloud(rgb_img, depth)
+        bgr_img = o3d.io.read_image(rgb_file_list[i])
+        #rgb_img = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
+        depth = o3d.io.read_image(depth_file_list[i])
+        pcd = depth_image_to_point_cloud(bgr_img, depth)
         pcd_list.append(pcd)
     
 
@@ -118,31 +105,28 @@ def reconstruct(args):
     aligned_pcd_list = [source_pcd]  
 
     trans = np.identity(4)
-    for i in range(1, 5):
+    for i in range(1, 10):
         target = copy.deepcopy(pcd_list[i])
-        source_down, source_fpth = preprocess_point_cloud(source_pcd)
-        target_down, target_fpfh = preprocess_point_cloud(target)
-         # Update the source point cloud for the next iteration
-        source_pcd = copy.deepcopy(pcd_list[i])
-
+        source_down, source_fpth = preprocess_point_cloud(source_pcd, voxel_size)
+        target_down, target_fpfh = preprocess_point_cloud(target, voxel_size)
+        
         # global registration (optional)
         global_trans = execute_global_registration(
-            target_down, source_down,  target_fpfh, source_fpth)
+            target_down, source_down,  target_fpfh, source_fpth, voxel_size)
         # local ICP registration
+        
         local_trans = local_icp_algorithm(
-            target_down, source_down, global_trans,
+            target_down, source_down, global_trans,voxel_size
         )
-
-        trans = trans@global_trans
+        
+        trans = trans@local_trans
         target.transform(trans)
-       
+        source_pcd = copy.deepcopy(pcd_list[i])
 
         aligned_pcd_list.append(target)
         
         #estimated_poses.append(np.asarray(target.transformation))
-    print(len(aligned_pcd_list))
 
-    #draw_registration_result(source_down, target_down, trans)
     return aligned_pcd_list, estimated_poses
 
 
@@ -177,7 +161,7 @@ if __name__ == '__main__':
     '''
     Hint: Follow the steps on the spec
     '''
-    result_pcd, pred_cam_pos = reconstruct(args)
+    result_pcd, pred_cam_pos = reconstruct(args, rgb_file_list, depth_file_list)
 
     # TODO: Calculate and print L2 distance
     '''
